@@ -68,7 +68,7 @@ def _support_tab():
 
     if clear:
         st.session_state.user_input = ""
-        st.experimental_rerun()
+        st.toast("Cleared ✨")  # no manual rerun needed
 
     if ask and st.session_state.user_input.strip():
         with st.spinner("Thinking…"):
