@@ -34,31 +34,57 @@ def _parse_json_safe(text: str) -> Dict[str, str]:
             "action": "Set a 2-minute timer and write one next tiny step."
         }
 
-def get_ai_response(user_text: str, api_key: str | None = None) -> Tuple[bool, Dict[str, str] | str]:
+def get_ai_response(user_text: str, api_key: str | None = None, model: str | None = None):
+    # 1) resolve API key
     key = api_key or os.getenv("GROQ_API_KEY", "")
+    if not key:
+        try:
+            import streamlit as st
+            key = st.secrets.get("GROQ_API_KEY", "")
+        except Exception:
+            key = ""
     if not key:
         return False, "Missing GROQ_API_KEY. Add it in .streamlit/secrets.toml or as an environment variable."
 
+    # 2) build model list (selected first, then fallbacks)
+    from .config import GROQ_MODEL, GROQ_MODEL_CANDIDATES
+    tried = []
+    models_to_try = []
+    if model:
+        models_to_try.append(model)
+    # ensure uniqueness while keeping order
+    for m in [GROQ_MODEL] + GROQ_MODEL_CANDIDATES:
+        if m not in models_to_try:
+            models_to_try.append(m)
+
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": _build_messages(user_text),
-        "temperature": 0.6,
-        "response_format": {"type": "json_object"}
-    }
-    try:
-        resp = requests.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=45)
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        data = _parse_json_safe(content)
-        for k in ["suggestion", "spiritual", "action"]:
-            data.setdefault(k, "")
-        return True, data
-    except requests.HTTPError as e:
+
+    last_error = None
+    for m in models_to_try:
+        payload = {
+            "model": m,
+            "messages": _build_messages(user_text),
+            "temperature": 0.6,
+            "response_format": {"type": "json_object"},
+        }
         try:
-            detail = resp.json()
-        except Exception:
-            detail = str(e)
-        return False, f"HTTP error from Groq: {detail}"
-    except Exception as e:
-        return False, f"Unexpected error: {e}"
+            resp = requests.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=45)
+            if resp.status_code >= 400:
+                # capture error text but keep trying next model
+                last_error = resp.text
+                tried.append(m)
+                continue
+            content = resp.json()["choices"][0]["message"]["content"]
+            data = _parse_json_safe(content)
+            for k in ["suggestion", "spiritual", "action"]:
+                data.setdefault(k, "")
+            # also return which model answered (nice for debugging)
+            data["_model_used"] = m
+            return True, data
+        except Exception as e:
+            last_error = str(e)
+            tried.append(m)
+            continue
+
+    # If we got here, every model failed
+    return False, f"All model attempts failed. Tried: {tried}. Last error: {last_error}"
